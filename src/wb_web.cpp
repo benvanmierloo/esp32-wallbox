@@ -231,6 +231,7 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         "<script src='/app.js?v=" + buildVer + "' defer></script>"
         "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
         "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var h=handlers[m.t];if(h)h(m.d,m)}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){handlers[t]=fn},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
+        "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[2,20,179],complete=[21],paused=[3,22,178,193],error=[6,14],ready=[0,7,16,161,189],connected=[1,13,17];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
         "</head><body><div class='container'>"
         "<div class='ble-bar'><span class='ble-dot'></span>BLE: ";
     h += bleState;
@@ -260,7 +261,7 @@ static String htmlFoot(const char* activePath) {
     navItem("/info", SVG_INFO, "Info");
     h += "</nav>"
          "<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(function(){});</script>"
-         "<script>(function(){var r=function(){document.body.classList.add('ready')};if(document.readyState==='complete')r();else window.addEventListener('load',r)})();</script>"
+         "<script>(function(){var r=function(){document.body.classList.add('ready')};if(document.readyState==='interactive'||document.readyState==='complete')r();else document.addEventListener('DOMContentLoaded',r)})();</script>"
          "</body></html>";
     return h;
 }
@@ -342,6 +343,8 @@ static void handleApiStatus() {
     json += ",\"ble_paused\":" + String(wallboxBLE.isPaused() ? "true" : "false");
     json += ",\"ble_pause_remaining\":" + String(wallboxBLE.pauseRemainingMs() / 1000);
     json += ",\"ble_last_activity_s\":" + String(wallboxBLE.lastActivityAge() / 1000);
+    json += ",\"auth_enabled\":" + String(configMgr.get().authEnabled && configMgr.get().authPass.length() > 0 ? "true" : "false");
+    json += ",\"sta_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
     json += "}";
     http.send(200, "application/json", json);
 }
@@ -425,6 +428,7 @@ static void handleDashboard() {
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Dashboard...</div>
 <div id='pg' style='display:none'>
 <h1>&#x26A1; Wallbox</h1>
+<div id='auth-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No web password set — anyone on your WiFi can control this charger. <a href='/config' style='color:#f59e0b;text-decoration:underline'>Set one</a></div>
 <div id='pin-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No BLE PIN set — anyone nearby can control your charger. <a href='/settings' style='color:#f59e0b;text-decoration:underline'>Set a PIN</a></div>
 <div id='ble-health' style='display:none;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em'></div>
 <div id='notif-bar' style='display:none;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#ef4444;cursor:pointer' onclick='showNotifs()'>&#x1F514; <span id='notif-count'></span> charger notification(s) — tap to view</div>
@@ -471,7 +475,7 @@ function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st=
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null')return;var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){applyMeterData(d.r)}).catch(function(){})}
 // Hook WS push handlers
-if(window.wbws){window.wbws.subscribe('status',function(d){applyStatusData(d&&d.r?d.r:d,null)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});}
+if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});}
 // Render cached values immediately (no spinners)
 try{var c=JSON.parse(localStorage.getItem('wb-last-status')||'null');if(c)applyStatusData(c.s,c.rt)}catch(e){}
 try{var cm=JSON.parse(localStorage.getItem('wb-last-meter')||'null');if(cm)applyMeterData(cm.d)}catch(e){}
@@ -481,6 +485,7 @@ function setCurrent(v){if(_curTimer)clearTimeout(_curTimer);_curTimer=setTimeout
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 P();setInterval(P,10000);
 fetch('/api/command?action=bapi&met=read_pin&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&!d.r.pin)document.getElementById('pin-warn').style.display='block'}).catch(function(){});
+fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.sta_connected&&!s.auth_enabled){var b=document.getElementById('auth-warn');if(b)b.style.display='block'}}).catch(function(){});
 var _notifs=[];
 function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
 function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
@@ -525,6 +530,10 @@ static void handleSettings() {
 <div class='tab-panel active' id='tp0'>
   <div class='card'>
     <div class='card-header'><span class='card-icon'>&#x1F4C5;</span><h2>Charging Schedules</h2></div>
+    <div id='sch-timeline-wrap' style='display:none;overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -4px 12px;padding:0 4px'>
+      <div id='sch-timeline' style='display:grid;grid-template-columns:36px repeat(24,minmax(10px,1fr));gap:1px;font-size:.65em;min-width:320px'></div>
+      <div id='sch-legend' style='display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;font-size:.72em'></div>
+    </div>
     <div id='sch-list'><span class='spinner'></span> Loading...</div>
     <div class='row' style='margin-top:12px'>
       <button class='btn btn-success' onclick='newSchedule()'>+ Add New</button>
@@ -599,6 +608,7 @@ static void handleSettings() {
       <button class='btn btn-outline' style='padding:12px' onclick='E("halo")'>&#x1F4A1; Halo LED</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("theme")'>&#x1F3A8; Theme</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("cost")'>&#x1F4B0; Charging Cost</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("notif")'>&#x1F514; Notifications</button>
       <button id='ble-pause-btn' class='btn btn-outline' style='padding:12px' onclick='pauseBle()'>&#x1F4F4; Release BLE for App</button>
       <button class='btn btn-outline' style='padding:12px' onclick='confirm2("Reboot the charger?",function(){fetch("/api/command?action=reboot").then(function(){toast("Reboot sent","success")})})' style='background:rgba(239,68,68,.08);border-color:var(--danger);color:var(--danger)'>&#x1F504; Reboot</button>
     </div>
@@ -624,7 +634,84 @@ function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.
   window._editTariff=T;
   r.innerHTML=renderCostPanel(T);
   return
+}else if(type==='notif'){
+  var supported=(typeof Notification!=='undefined');
+  var secure=(window.isSecureContext===true);
+  var perm=supported?Notification.permission:'unsupported';
+  var canUseLocal=supported&&secure&&perm!=='denied';
+  var h2="<h2>&#x1F514; Notifications</h2>";
+  if(!secure){
+    h2+="<div style='background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:10px;margin-bottom:12px;font-size:.85em;color:#f59e0b'>&#x26A0; Your browser is blocking notifications because this page is served over plain HTTP. Browsers require HTTPS for the Notification API. Use the Home Assistant route below instead.</div>";
+  }
+  h2+="<h3 style='font-size:.95em;margin:12px 0 8px;color:var(--text2)'>Recommended: Home Assistant push</h3>";
+  h2+="<div style='font-size:.82em;color:var(--text3);margin-bottom:8px'>HA's Companion app already gives you proper phone notifications. Add this automation in HA (Settings &rarr; Automations &rarr; YAML mode):</div>";
+  h2+="<pre style='background:var(--bg);border-radius:8px;padding:10px;font-size:.72em;overflow-x:auto;margin:0;color:var(--text)'>"+"alias: Wallbox charging complete\\ntrigger:\\n  - platform: state\\n    entity_id: sensor.wallbox_pulsar_max_status\\n    to: Charge Complete\\naction:\\n  - service: notify.mobile_app_YOUR_PHONE\\n    data:\\n      title: Charging complete\\n      message: Car is ready ({{ states('sensor.wallbox_pulsar_max_session_energy') }} kWh)".replace(/\\\\n/g,'\\n')+"</pre>";
+  h2+="<div style='font-size:.78em;color:var(--text3);margin-top:6px'>Replace <code>YOUR_PHONE</code> with your Companion app's mobile_app entity. Repeat the trigger block with different <code>to:</code> values (<code>Error</code>, <code>Charging</code>) for other events.</div>";
+  if(canUseLocal){
+    var N=loadNotifSettings();
+    h2+="<h3 style='font-size:.95em;margin:18px 0 8px;color:var(--text2)'>Alternative: browser notifications (foreground only)</h3>";
+    h2+="<div style='font-size:.82em;color:var(--text3);margin-bottom:8px'>Permission status: "+(perm==='granted'?'<span style=\"color:#22c55e\">Granted</span>':'Not yet asked')+". Notifications only fire while this site is open in a tab.</div>";
+    h2+="<label style='display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px'><input type='checkbox' id='notif-en' "+(N.enabled?'checked':'')+" style='width:auto'> Enable browser notifications</label>";
+    var events=[{k:'started',t:'Charging starts'},{k:'complete',t:'Charging complete'},{k:'paused',t:'Charging paused'},{k:'error',t:'Charger error'},{k:'plug_in',t:'Plug connected'},{k:'plug_out',t:'Plug disconnected'}];
+    h2+="<div style='font-size:.82em;color:var(--text2);margin-top:8px'>Trigger on:</div>";
+    events.forEach(function(e){h2+="<label style='display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px'><input type='checkbox' data-notif='"+e.k+"' "+(N.events[e.k]?'checked':'')+" style='width:auto'>"+e.t+"</label>"});
+    h2+="<div class='row' style='margin-top:14px'><button class='btn btn-success' onclick='saveNotif()'>Save</button><button class='btn btn-outline' onclick='testNotif()'>Send test</button></div>";
+  }
+  r.innerHTML=h2;
+  return
 }r.innerHTML=h}
+function loadNotifSettings(){
+  var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};
+  try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}
+}
+function saveNotif(){
+  var en=document.getElementById('notif-en').checked;
+  var events={};
+  document.querySelectorAll('[data-notif]').forEach(function(c){events[c.getAttribute('data-notif')]=c.checked});
+  var s={enabled:en,events:events};
+  if(en&&typeof Notification!=='undefined'&&Notification.permission==='default'){
+    Notification.requestPermission().then(function(p){if(p!=='granted'){toast('Notifications were not granted','warning')}});
+  }
+  try{localStorage.setItem('wb-notif',JSON.stringify(s));toast('Notifications saved','success')}catch(e){toast('Save failed','error')}
+}
+function testNotif(){
+  if(typeof Notification==='undefined'){toast('Browser does not support notifications','error');return}
+  if(Notification.permission==='default'){Notification.requestPermission().then(function(p){if(p==='granted')fireNotif('Test','This is a test notification from your Wallbox gateway.')});return}
+  if(Notification.permission!=='granted'){toast('Notifications blocked in browser settings','error');return}
+  fireNotif('Test','This is a test notification from your Wallbox gateway.');
+}
+function fireNotif(title,body){
+  try{
+    var icon='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%233b82f6"><path d="M14 3v6h4l-7 12v-9H7l7-9z"/></svg>';
+    new Notification(title,{body:body,icon:icon,tag:'wb',silent:false});
+  }catch(e){console.error('Notification failed',e)}
+}
+// Charging-status transition watcher — fires browser notifications on WS pushes
+var _lastSt=null;
+function watchStatusForNotif(s){
+  if(!s||typeof s.st!=='number')return;
+  var st=s.st;
+  if(_lastSt===null){_lastSt=st;return}
+  if(st===_lastSt)return;
+  var N=loadNotifSettings();
+  if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted'){_lastSt=st;return}
+  // Status code groups
+  var charging=[2,20,179];
+  var complete=[21];
+  var paused=[3,22,178,193];
+  var error=[6,14];
+  var ready=[0,7,16,161,189];
+  var connected=[1,13,17];
+  var was=_lastSt;
+  function inGroup(s,g){return g.indexOf(s)>=0}
+  if(inGroup(st,complete)&&N.events.complete)fireNotif('Charging complete','Your car is ready to go.');
+  else if(inGroup(st,charging)&&!inGroup(was,charging)&&N.events.started)fireNotif('Charging started',(SN[st]||'Active')+'.');
+  else if(inGroup(st,paused)&&!inGroup(was,paused)&&N.events.paused)fireNotif('Charging paused',SN[st]||'Paused.');
+  else if(inGroup(st,error)&&!inGroup(was,error)&&N.events.error)fireNotif('Charger error',SN[st]||'See dashboard.');
+  else if(inGroup(st,connected)&&inGroup(was,ready)&&N.events.plug_in)fireNotif('Plug connected','Ready to start charging.');
+  else if(inGroup(st,ready)&&!inGroup(was,ready)&&N.events.plug_out)fireNotif('Plug disconnected','Charger is now idle.');
+  _lastSt=st;
+}
 function saveAutoLock(){var p=JSON.stringify({enabled:parseInt(document.getElementById('al-en').value),time:parseInt(document.getElementById('al-time').value)});toast('Saving auto lock...','info');fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveEco(){var mode=parseInt(document.getElementById('eco-mode').value);var espEl=document.getElementById('eco-esp');var esp=espEl?parseInt(espEl.value)||0:50;var p=JSON.stringify({mode:mode,esp:esp});toast('Saving eco smart...','info');fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveOcpp(){var p=JSON.stringify({u:document.getElementById('ocpp-url').value,chid:document.getElementById('ocpp-id').value,pw:document.getElementById('ocpp-pw').value,e:parseInt(document.getElementById('ocpp-en').value)});toast('Saving OCPP...','info');fetch('/api/command?action=bapi&met=s_ocpp&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'OCPP config saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
@@ -705,6 +792,72 @@ function applyTheme(t){
     toast('Theme: '+(t==='auto'?'Auto':t.charAt(0).toUpperCase()+t.slice(1)),'success');
   }catch(e){toast('Failed to save theme','error')}
 }
+var SCH_COLORS=['#3b82f6','#22c55e','#f59e0b','#a855f7','#ec4899','#06b6d4','#84cc16','#f97316'];
+// Parse a HHMM UTC string into the local-time hour (0-23) in CHARGER_TZ.
+function _utcHHMMtoLocalHour(hhmm){
+  var s=String(hhmm).padStart(4,'0');
+  var h=parseInt(s.slice(0,2)),m=parseInt(s.slice(2,4));
+  try{
+    var now=new Date();
+    var d=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate(),h,m));
+    var localStr=d.toLocaleString('en-US',{timeZone:CHARGER_TZ,hour12:false,hour:'2-digit',minute:'2-digit'});
+    // localStr is e.g. "14:32" — pull hour
+    return parseInt(localStr.split(':')[0])%24;
+  }catch(e){return h}
+}
+function buildScheduleTimeline(schedules){
+  var wrap=document.getElementById('sch-timeline-wrap');
+  var grid=document.getElementById('sch-timeline');
+  var legend=document.getElementById('sch-legend');
+  if(!wrap||!grid||!legend)return;
+  if(!schedules||!schedules.length){wrap.style.display='none';return}
+  // Build [day][hour] -> array of schedule indexes that cover it
+  var cells=[];
+  for(var d=0;d<7;d++){cells.push([]);for(var h=0;h<24;h++)cells[d].push([])}
+  schedules.forEach(function(s,i){
+    if(!s.enabled)return;
+    var fromH=_utcHHMMtoLocalHour(s.start);
+    var toH=_utcHHMMtoLocalHour(s.stop);
+    if(toH===fromH)toH=(fromH+24)%24;  // 24h block
+    for(var d=0;d<7;d++){
+      if(!(s.days&(1<<d)))continue;
+      var h=fromH;
+      while(h!==toH){cells[d][h].push(i);h=(h+1)%24}
+    }
+  });
+  // Render header row: corner cell + hour ticks
+  var html="<div></div>";
+  for(var h=0;h<24;h++){html+="<div style='text-align:center;color:var(--text3);line-height:1'>"+(h%6===0?h:'')+"</div>"}
+  // Day rows
+  for(var d=0;d<7;d++){
+    html+="<div style='font-weight:600;color:var(--text2);padding-right:4px;font-size:.85em'>"+DAYS_M[d]+"</div>";
+    for(var h=0;h<24;h++){
+      var c=cells[d][h];
+      var bg='var(--elevated)';
+      var title=DAYS_M[d]+' '+h+':00';
+      if(c.length===1){
+        bg=SCH_COLORS[c[0]%SCH_COLORS.length];
+        title+=' — #'+schedules[c[0]].sid;
+      }else if(c.length>1){
+        // overlap: striped background using two colors
+        bg='repeating-linear-gradient(45deg,'+SCH_COLORS[c[0]%SCH_COLORS.length]+' 0 4px,'+SCH_COLORS[c[1]%SCH_COLORS.length]+' 4px 8px)';
+        title+=' — overlap: #'+c.map(function(i){return schedules[i].sid}).join(', #');
+      }
+      html+="<div title='"+title+"' style='aspect-ratio:1;background:"+bg+";border-radius:2px;min-height:10px'></div>";
+    }
+  }
+  grid.innerHTML=html;
+  // Legend
+  var lg='';
+  schedules.forEach(function(s,i){
+    if(!s.enabled)return;
+    var color=SCH_COLORS[i%SCH_COLORS.length];
+    var t1=utcToLocal(s.start),t2=utcToLocal(s.stop);
+    lg+="<div style='display:inline-flex;align-items:center;gap:4px;color:var(--text3)'><span style='display:inline-block;width:10px;height:10px;background:"+color+";border-radius:2px'></span>#"+s.sid+" "+t1+"–"+t2+"</div>";
+  });
+  legend.innerHTML=lg||'<span style=\"color:var(--text3)\">All schedules disabled</span>';
+  wrap.style.display='block';
+}
 function loadSchedules(){
   var l=document.getElementById('sch-list');
   if(!l)return;
@@ -716,6 +869,7 @@ function loadSchedules(){
     else if(Array.isArray(d.r))sc=d.r;
     if(sc===null){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return}
     allSchedules=sc;
+    try{buildScheduleTimeline(sc)}catch(e){console.error('timeline failed',e)}
     if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet. Tap + Add New to create one.</div>';return}
     var html='';
     sc.forEach(function(s){
@@ -880,13 +1034,19 @@ static void handleConfig() {
 
     // Security
     page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F512;</span><h2>Web Security</h2></div>";
+    if (!cfg.authEnabled || cfg.authPass.length() == 0) {
+        page += "<div style='background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.30);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.85em;color:#f59e0b'>";
+        page += "&#x26A0; <b>No password set.</b> Anyone on your local network can control the charger via this UI. ";
+        page += "Set a password below (we'll enable auth automatically when you save).";
+        page += "</div>";
+    }
     page += "<label>Enable Authentication</label>";
     page += "<select name='auth_en'><option value='0'" + String(cfg.authEnabled ? "" : " selected") + ">Disabled</option><option value='1'" + String(cfg.authEnabled ? " selected" : "") + ">Enabled</option></select>";
     page += "<div class='row'>";
     page += "<div><label>Username</label><input name='auth_user' value='" + cfg.authUser + "'></div>";
-    page += "<div><label>Password</label><input type='password' name='auth_pass' value='" + cfg.authPass + "'></div>";
+    page += "<div><label>Password <span style='color:var(--text3);font-weight:400'>(recommended)</span></label><input type='password' name='auth_pass' value='" + cfg.authPass + "' placeholder='Leave blank to skip — local network only'></div>";
     page += "</div>";
-    page += "<p class='help'>When enabled, all control actions and OTA require login. Dashboard viewing remains open.</p></div>";
+    page += "<p class='help'>When enabled, all control actions and OTA require login. Dashboard viewing remains open. If you set a password and leave auth disabled, we'll enable it for you.</p></div>";
 
     // Advanced
     page += "<details><summary style='color:var(--text3);cursor:pointer;padding:6px 0;font-size:.85em'>Advanced</summary><div class='card'>";
@@ -1008,6 +1168,8 @@ static void handleSave() {
     cfg.mqttClientId = http.arg("mqtt_cid");
     cfg.authEnabled = http.arg("auth_en") == "1";
     cfg.authUser = http.arg("auth_user"); cfg.authPass = http.arg("auth_pass");
+    // Convenience: if the user typed a password but didn't flip the toggle, turn auth on for them.
+    if (!cfg.authEnabled && cfg.authPass.length() > 0) cfg.authEnabled = true;
     cfg.bleAddr = normalizeMAC(http.arg("ble_addr")); cfg.blePin = http.arg("ble_pin");
     cfg.bleService = http.arg("ble_svc"); cfg.bleChar = http.arg("ble_chr");
     cfg.statusPollMs = http.arg("poll_status").toInt();
@@ -1089,10 +1251,12 @@ static void handleSessionsPage() {
     <div style='background:var(--bg);border-radius:8px;padding:10px;text-align:center'>
       <div style='font-size:.68em;color:var(--text3);text-transform:uppercase;letter-spacing:.5px'>Week Cost</div>
       <div id='tile-week-cost' style='font-size:1.1em;font-weight:600;margin-top:4px;color:#22c55e'>–</div>
+      <div id='tile-week-saved' style='font-size:.72em;color:#fbbf24;margin-top:2px'></div>
     </div>
     <div style='background:var(--bg);border-radius:8px;padding:10px;text-align:center'>
       <div style='font-size:.68em;color:var(--text3);text-transform:uppercase;letter-spacing:.5px'>Month Cost</div>
       <div id='tile-month-cost' style='font-size:1.1em;font-weight:600;margin-top:4px;color:#22c55e'>–</div>
+      <div id='tile-month-saved' style='font-size:.72em;color:#fbbf24;margin-top:2px'></div>
     </div>
   </div>
   <div style='text-align:center;font-size:.7em;color:var(--text3);margin-top:8px'>Long-term graphs: use the HA Energy dashboard</div>
@@ -1192,6 +1356,26 @@ function getRateAt(ts){
   }
   return TARIFF.baseRate;
 }
+function savingsOf(session){
+  if(!TARIFF||!TARIFF.enabled)return null;
+  if(!session.ts||!session.gen)return 0;
+  var greenKwh=(session.gen||0)/1000;
+  var totalKwh=(session.en||0)/1000;
+  if(greenKwh>totalKwh)greenKwh=totalKwh;
+  var step=300;
+  var dur=session.dur||3600;
+  var n=Math.max(1,Math.ceil(dur/step));
+  var sumRate=0,count=0;
+  for(var i=0;i<n;i++){
+    var t=session.ts+i*step;
+    if(t>=session.ts+dur)break;
+    var r=getRateAt(t);
+    if(r==null)r=TARIFF.baseRate;
+    sumRate+=r;count++;
+  }
+  var avgRate=count>0?sumRate/count:TARIFF.baseRate;
+  return greenKwh*Math.max(0,avgRate-TARIFF.greenRate);
+}
 function costOf(session){
   if(!TARIFF||!TARIFF.enabled)return null;
   if(!session.ts||!session.en)return 0;
@@ -1232,11 +1416,17 @@ function renderTiles(sessions, lifetimeKwh){
   document.getElementById('tile-month').textContent=monthKwh.toFixed(1)+' kWh';
   // Cost tiles (computed if tariff enabled)
   if(TARIFF&&TARIFF.enabled){
-    var weekCost=0,monthCost=0;
-    sessions.forEach(function(s){if(!s.ts)return;var c=costOf(s);if(c==null)return;if(s.ts>=weekSec)weekCost+=c;if(s.ts>=monthSec)monthCost+=c});
+    var weekCost=0,monthCost=0,weekSaved=0,monthSaved=0;
+    sessions.forEach(function(s){
+      if(!s.ts)return;
+      var c=costOf(s);if(c!=null){if(s.ts>=weekSec)weekCost+=c;if(s.ts>=monthSec)monthCost+=c}
+      var sv=savingsOf(s);if(sv!=null){if(s.ts>=weekSec)weekSaved+=sv;if(s.ts>=monthSec)monthSaved+=sv}
+    });
     var costRow=document.getElementById('cost-row');if(costRow)costRow.style.display='grid';
     var w=document.getElementById('tile-week-cost');if(w)w.textContent=fmt$(weekCost);
     var m=document.getElementById('tile-month-cost');if(m)m.textContent=fmt$(monthCost);
+    var ws=document.getElementById('tile-week-saved');if(ws)ws.textContent=weekSaved>0.005?'☀ saved '+fmt$(weekSaved):'';
+    var ms=document.getElementById('tile-month-saved');if(ms)ms.textContent=monthSaved>0.005?'☀ saved '+fmt$(monthSaved):'';
   }else{
     var costRow=document.getElementById('cost-row');if(costRow)costRow.style.display='none';
   }
